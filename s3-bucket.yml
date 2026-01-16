@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: "2010-09-09"
-Description: "S3 + SQS: carga de archivo en S3 envia mensaje a una cola SQS (desacoplado)."
+Description: "S3 + SQS + Lambda: al subir archivo a S3 se manda mensaje a SQS y Lambda procesa asincrono."
 
 Parameters:
   BucketName:
@@ -7,14 +7,15 @@ Parameters:
     Description: Nombre unico del bucket S3
 
 Resources:
-  # 1) Cola SQS (con nombre unico por stack)
+  # -----------------------
+  # SQS
+  # -----------------------
   IngestQueue:
     Type: AWS::SQS::Queue
     Properties:
       QueueName: !Sub "${AWS::StackName}-ingest-queue"
       VisibilityTimeout: 60
 
-  # 2) Policy de la cola: permite que S3 envie mensajes a SQS
   IngestQueuePolicy:
     Type: AWS::SQS::QueuePolicy
     Properties:
@@ -33,31 +34,125 @@ Resources:
               ArnEquals:
                 aws:SourceArn: !Sub "arn:aws:s3:::${BucketName}"
 
-  # 3) Bucket S3 seguro + notificacion a SQS cuando se crea un objeto
+  # -----------------------
+  # S3
+  # -----------------------
   MyBucket:
     Type: AWS::S3::Bucket
     DependsOn: IngestQueuePolicy
     Properties:
       BucketName: !Ref BucketName
-
       VersioningConfiguration:
         Status: Enabled
-
       BucketEncryption:
         ServerSideEncryptionConfiguration:
           - ServerSideEncryptionByDefault:
               SSEAlgorithm: AES256
-
       PublicAccessBlockConfiguration:
         BlockPublicAcls: true
         IgnorePublicAcls: true
         BlockPublicPolicy: true
         RestrictPublicBuckets: true
-
       NotificationConfiguration:
         QueueConfigurations:
           - Event: "s3:ObjectCreated:*"
             Queue: !GetAtt IngestQueue.Arn
+
+  # -----------------------
+  # IAM Role para Lambda
+  # -----------------------
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${AWS::StackName}-lambda-exec"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        # Logs básicos a CloudWatch
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: ReadFromS3
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource: !Sub "arn:aws:s3:::${BucketName}/*"
+        - PolicyName: ConsumeSQS
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:GetQueueAttributes
+                  - sqs:ChangeMessageVisibility
+                Resource: !GetAtt IngestQueue.Arn
+
+  # -----------------------
+  # Lambda Function (Python) - code inline
+  # -----------------------
+  IngestProcessorFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-ingest-processor"
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 30
+      MemorySize: 256
+      Environment:
+        Variables:
+          BUCKET_NAME: !Ref BucketName
+      Code:
+        ZipFile: |
+          import json
+          import urllib.parse
+          import boto3
+
+          s3 = boto3.client("s3")
+
+          def handler(event, context):
+              # SQS -> cada record trae un body que contiene el evento de S3 (JSON)
+              for record in event.get("Records", []):
+                  body = record.get("body", "{}")
+                  try:
+                      s3_event = json.loads(body)
+                  except json.JSONDecodeError:
+                      print("Body no es JSON:", body)
+                      continue
+
+                  # Estructura típica del evento S3
+                  for s3rec in s3_event.get("Records", []):
+                      bucket = s3rec["s3"]["bucket"]["name"]
+                      key = urllib.parse.unquote_plus(s3rec["s3"]["object"]["key"])
+
+                      print(f"Procesando archivo: s3://{bucket}/{key}")
+
+                      # Lee el objeto (solo para demostrar)
+                      obj = s3.get_object(Bucket=bucket, Key=key)
+                      data = obj["Body"].read(200)  # lee primeros 200 bytes
+                      print("Primeros bytes:", data)
+
+              return {"ok": True}
+
+  # -----------------------
+  # Conectar SQS -> Lambda (Event Source Mapping)
+  # -----------------------
+  QueueToLambdaEventSource:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      EventSourceArn: !GetAtt IngestQueue.Arn
+      FunctionName: !Ref IngestProcessorFunction
+      Enabled: true
+      BatchSize: 5
 
 Outputs:
   BucketNameOutput:
@@ -68,3 +163,6 @@ Outputs:
 
   QueueArn:
     Value: !GetAtt IngestQueue.Arn
+
+  LambdaName:
+    Value: !Ref IngestProcessorFunction
