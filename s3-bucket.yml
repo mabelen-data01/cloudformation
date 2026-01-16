@@ -7,10 +7,11 @@ Parameters:
     Description: Nombre unico del bucket S3
 
 Resources:
-  # 1) Cola SQS
+  # 1) Cola SQS (con nombre unico por stack)
   IngestQueue:
     Type: AWS::SQS::Queue
     Properties:
+      QueueName: !Sub "${AWS::StackName}-ingest-queue"
       VisibilityTimeout: 60
 
   # 2) Policy de la cola: permite que S3 envie mensajes a SQS
@@ -32,7 +33,7 @@ Resources:
               ArnEquals:
                 aws:SourceArn: !Sub "arn:aws:s3:::${BucketName}"
 
-  # 3) Bucket S3 seguro + notificacion a SQS
+  # 3) Bucket S3 seguro + notificacion a SQS cuando se crea un objeto
   MyBucket:
     Type: AWS::S3::Bucket
     DependsOn: IngestQueuePolicy
