@@ -1,4 +1,4 @@
-name: name: Deploy CloudFormation S3
+name: Deploy CloudFormation S3
 
 on:
   workflow_dispatch:
