@@ -1,24 +1,69 @@
 AWSTemplateFormatVersion: "2010-09-09"
-Description: "S3 bucket seguro con CloudFormation"
+Description: "S3 + SQS: carga de archivo en S3 envia mensaje a una cola SQS (desacoplado)."
 
 Parameters:
   BucketName:
     Type: String
-    Description: Nombre unico del bucket
+    Description: Nombre unico del bucket S3
 
 Resources:
+  # 1) Cola SQS
+  IngestQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      VisibilityTimeout: 60
+
+  # 2) Policy de la cola: permite que S3 envie mensajes a SQS
+  IngestQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref IngestQueue
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowS3SendMessage
+            Effect: Allow
+            Principal:
+              Service: s3.amazonaws.com
+            Action: sqs:SendMessage
+            Resource: !GetAtt IngestQueue.Arn
+            Condition:
+              ArnEquals:
+                aws:SourceArn: !Sub "arn:aws:s3:::${BucketName}"
+
+  # 3) Bucket S3 seguro + notificacion a SQS
   MyBucket:
     Type: AWS::S3::Bucket
+    DependsOn: IngestQueuePolicy
     Properties:
       BucketName: !Ref BucketName
+
       VersioningConfiguration:
         Status: Enabled
+
       BucketEncryption:
         ServerSideEncryptionConfiguration:
           - ServerSideEncryptionByDefault:
               SSEAlgorithm: AES256
+
       PublicAccessBlockConfiguration:
         BlockPublicAcls: true
         IgnorePublicAcls: true
         BlockPublicPolicy: true
         RestrictPublicBuckets: true
+
+      NotificationConfiguration:
+        QueueConfigurations:
+          - Event: "s3:ObjectCreated:*"
+            Queue: !GetAtt IngestQueue.Arn
+
+Outputs:
+  BucketNameOutput:
+    Value: !Ref MyBucket
+
+  QueueUrl:
+    Value: !Ref IngestQueue
+
+  QueueArn:
+    Value: !GetAtt IngestQueue.Arn
