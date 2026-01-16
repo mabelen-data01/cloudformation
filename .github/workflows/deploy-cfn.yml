@@ -1,11 +1,12 @@
-name: Deploy CloudFormation S3
+name: name: Deploy CloudFormation S3
 
 on:
   workflow_dispatch:
   push:
     branches: ["main"]
     paths:
-      - "cloudformation/**"
+      - "s3-bucket.yml"
+      - ".github/workflows/**"
 
 permissions:
   id-token: write
@@ -28,5 +29,5 @@ jobs:
         run: |
           aws cloudformation deploy \
             --stack-name ${{ secrets.CFN_STACK_NAME }} \
-            --template-file cloudformation/s3-bucket.yml \
+            --template-file s3-bucket.yml \
             --parameter-overrides BucketName=${{ secrets.BUCKET_NAME }}
